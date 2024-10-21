@@ -2,13 +2,17 @@ import json
 import sys
 import time
 from typing import Pattern, AnyStr
+from typing import List, Dict, Any
 
 import httpx
 import re
+import os
 
 from bilink.models import Authorization, Api, Message
 from bilink.utils.logger import Logger
 from bilink.utils.tools import create_headers
+
+import asyncio
 
 
 class __BaseMatcher:
@@ -50,12 +54,19 @@ class Matcher(__BaseMatcher):
             return False
 
 
-def is_new_msg():
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.dirname(current_dir)
+MESSAGES_FILE = os.path.join(parent_dir, 'messages.json')
+
+
+async def is_new_msg():
     """
     判断是否有新的消息（且不是自己的消息
     """
     if Message.Timestamp != Message.LastTimestamp and Message.SenderUid != Authorization.SelfUid:
         Logger.message(f"用户[{Message.SenderUid}]:{Message.MsgContent}")
+        await save_message_to_file(Message)
+
         return True
     else:
         return False
@@ -65,11 +76,70 @@ async def auto_reply(keywords: str, msg: str) -> None:
     """
     根据关键词自动回复一条消息
     """
-    if is_new_msg() and Matcher.starts_with(keywords):
+    if await is_new_msg() and Matcher.starts_with(keywords):
         await send_text_msg(
             msg,
             Message.SenderUid
         )
+
+
+async def send_by_key(keyword: str, user_msg: str) -> None:
+    """
+    根据关键词查找符合条件的消息并发送用户输入的消息
+    """
+    all_msgs = get_msgs()
+    matching_msgs = []
+
+    for msg in all_msgs:
+        # 确保 msg 是一个字典
+        if isinstance(msg, dict):
+            Message.MsgContent = msg.get('MsgContent', '')  # 假设消息内容存储在 'MsgContent' 键中
+            if Matcher.contains(keyword):
+                matching_msgs.append(msg)
+
+    # 发送用户输入的消息
+    for _ in matching_msgs:
+        Message.SenderUid = msg.get('SenderUid')  # 更新 SenderUid
+        await send_text_msg(user_msg, Message.SenderUid)  # 发送用户输入的消息
+
+
+"""
+现在找到了，还要发出去
+还有格式输出，现在太丑了
+"""
+
+
+def get_msgs() -> List[Dict[str, Any]]:
+    """
+    读取文件中的消息并返回消息列表。如果文件为空或没有消息，返回空列表。
+    """
+    if not os.path.exists(MESSAGES_FILE):
+        return []
+
+    try:
+        with open(MESSAGES_FILE, 'r', encoding='utf-8') as f:
+            content = f.read()
+            if not content.strip():
+                return []
+            return json.loads(content)
+    except Exception as e:
+        print(f"读取消息时发生错误: {e}")
+        return []
+
+
+def del_msgs() -> str:
+    """
+    删除文件内所有内容。
+    """
+    if not os.path.exists(MESSAGES_FILE):
+        return "文件已经不见了"
+
+    try:
+        with open(MESSAGES_FILE, 'w', encoding='utf-8') as f:
+            f.truncate(0)
+        return "消息已清空"
+    except Exception as e:
+        return f"删除消息时发生错误: {e}"
 
 
 async def send_text_msg(msg: str, receiver_id: int) -> None:
@@ -112,6 +182,7 @@ async def send_text_msg(msg: str, receiver_id: int) -> None:
         Logger.error(f"发生错误:{e}")
         sys.exit(-1)
 
+
 async def send_request() -> bool:
     """
     发送网络请求并解析数据
@@ -149,7 +220,37 @@ async def send_request() -> bool:
         Logger.error(f"发生错误:{e},正在重试...")
         time.sleep(2)
         return False
-    
+
+
+async def save_message_to_file(message: Message):
+    """
+    将消息存入文件，以JSON格式存储
+    """
+    message_data = {
+        'TalkerId': message.TalkerId,
+        'MsgContent': message.MsgContent,
+        'Timestamp': message.Timestamp,
+        'SenderUid': message.SenderUid
+    }
+    try:
+        lock = asyncio.Lock()
+        async with lock:
+            # 读取现有内容
+            try:
+                with open(MESSAGES_FILE, 'r', encoding='utf-8') as f:
+                    existing_messages = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                existing_messages = []
+
+            # 添加新消息
+            existing_messages.append(message_data)
+
+            # 写回文件
+            with open(MESSAGES_FILE, 'w', encoding='utf-8') as f:
+                json.dump(existing_messages, f, ensure_ascii=False, indent=4)
+        Logger.info("新消息已存入文件")
+    except Exception as e:
+        Logger.error(f"保存消息到文件时发生错误: {e}")
 
 
 async def fetch_msgs() -> None:
@@ -160,5 +261,3 @@ async def fetch_msgs() -> None:
         check = await send_request()
         if check:
             break
-    
-    
